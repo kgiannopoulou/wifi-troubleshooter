@@ -3,6 +3,7 @@ import { z } from "zod";
 import { pool } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
 import { apiError, HttpError } from "@/lib/api-error";
+import { assertNoCycleThrough, assertValidTargets, lockTree } from "@/lib/tree-rules";
 
 // Every option must lead somewhere — exactly one of nextNodeId/resolutionId,
 // mirroring the node_options_exactly_one_target CHECK constraint in
@@ -92,14 +93,25 @@ export async function POST(req: NextRequest) {
     try {
       await client.query("BEGIN");
 
-      // The first node ever created for a given model+symptom pair becomes
-      // that tree's root automatically — see the plan's simplification to
-      // avoid a separate "mark as root" admin action for v1.
-      const { rows: existing } = await client.query(
-        `SELECT 1 FROM nodes WHERE router_model_id = $1 AND symptom_id = $2 LIMIT 1`,
+      const tree = { routerModelId: data.routerModelId, symptomId: data.symptomId };
+      await lockTree(client, tree);
+
+      const { rows: treeExists } = await client.query(
+        `SELECT 1 FROM router_models m, symptoms s WHERE m.id = $1 AND s.id = $2`,
         [data.routerModelId, data.symptomId]
       );
-      const isRoot = existing.length === 0;
+      if (treeExists.length === 0) throw new HttpError(404, "Router model or symptom not found");
+      await assertValidTargets(client, tree, data.options);
+
+      // If this tree has no starting question yet (it's brand new, or its
+      // previous root was replaced), the new question becomes the root, so
+      // the public wizard always has an entry point. Admins can pick a
+      // different one later ("Make starting question" in the tree outline).
+      const { rows: existingRoot } = await client.query(
+        `SELECT 1 FROM nodes WHERE router_model_id = $1 AND symptom_id = $2 AND is_root`,
+        [data.routerModelId, data.symptomId]
+      );
+      const isRoot = existingRoot.length === 0;
 
       const { rows: nodeRows } = await client.query(
         `INSERT INTO nodes (router_model_id, symptom_id, question_text, is_root)
@@ -115,6 +127,10 @@ export async function POST(req: NextRequest) {
           [nodeId, option.label, index, option.nextNodeId ?? null, option.resolutionId ?? null]
         );
       }
+      // A brand-new question can't be the target of any option yet, so it
+      // can't close a loop — but the check is cheap and keeps POST and PUT
+      // under the same rules.
+      await assertNoCycleThrough(client, nodeId);
 
       await client.query("COMMIT");
       return NextResponse.json({ node: { id: nodeId, isRoot } }, { status: 201 });

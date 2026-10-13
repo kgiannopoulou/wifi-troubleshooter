@@ -16,7 +16,7 @@ export default async function ModelSymptomsPage(props: PageProps<"/diagnose/[mod
           &larr; Choose a different router
         </Link>
         <h1 className="mt-2 text-2xl font-semibold">{model.name}</h1>
-        <p className="mt-1 opacity-70">What's the problem?</p>
+        <p className="mt-1 opacity-70">What&apos;s the problem?</p>
       </div>
 
       <div className="flex flex-col divide-y divide-black/10 dark:divide-white/10">

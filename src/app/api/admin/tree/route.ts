@@ -9,8 +9,12 @@ import { apiError, HttpError } from "@/lib/api-error";
 // the flat /api/admin/nodes list, which is just insertion order.
 //
 // `path` accumulates visited ids to guard against cycles (the app never
-// creates one — see the "cannot link back to itself" check in
-// admin/nodes/[id]/route.ts — but a defensive guard costs nothing here).
+// creates one — see assertNoCycleThrough in lib/tree-rules.ts — but a
+// defensive guard costs nothing here).
+//
+// Questions the walk can't reach from the root (e.g. the tree has no root,
+// or nothing links to them yet) are listed afterwards with
+// `unreachable: true`, so they never silently vanish from the admin view.
 const TREE_QUERY = `
   WITH RECURSIVE walk AS (
     SELECT n.id, n.question_text, 0 AS depth, ARRAY[n.id] AS path
@@ -35,7 +39,15 @@ export async function GET(req: NextRequest) {
       throw new HttpError(400, "routerModelId and symptomId query params are required");
     }
 
-    const { rows: walked } = await pool.query(TREE_QUERY, [modelId, symptomId]);
+    const { rows: walkedRows } = await pool.query(TREE_QUERY, [modelId, symptomId]);
+    const walked = walkedRows.map((n) => ({ ...n, unreachable: false }));
+    const { rows: unreachable } = await pool.query(
+      `SELECT id, question_text, 0 AS depth FROM nodes
+       WHERE router_model_id = $1 AND symptom_id = $2 AND NOT (id = ANY($3::int[]))
+       ORDER BY id`,
+      [modelId, symptomId, walked.map((n) => n.id)]
+    );
+    walked.push(...unreachable.map((n) => ({ ...n, unreachable: true })));
     const nodeIds = walked.map((n) => n.id);
 
     const { rows: options } = nodeIds.length
@@ -57,10 +69,14 @@ export async function GET(req: NextRequest) {
     }
 
     return NextResponse.json({
-      nodes: walked.map((n) => ({
+      // The walk starts at the root, so it's non-empty iff a root exists.
+      hasRoot: walkedRows.length > 0,
+      nodes: walked.map((n, i) => ({
         id: n.id,
         questionText: n.question_text,
         depth: n.depth,
+        isRoot: !n.unreachable && i === 0,
+        unreachable: n.unreachable,
         options: (optionsByNode.get(n.id) ?? []).map((o) => ({
           label: o.label,
           leadsTo: o.next_node_id

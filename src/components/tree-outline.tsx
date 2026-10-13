@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { apiFetch } from "@/lib/api-client";
 
@@ -8,6 +8,8 @@ type TreeNode = {
   id: number;
   questionText: string;
   depth: number;
+  isRoot: boolean;
+  unreachable: boolean;
   options: {
     label: string;
     leadsTo: { type: "question"; nodeId: number } | { type: "resolution"; title: string | null };
@@ -20,14 +22,24 @@ type TreeNode = {
 // wizard.
 export function TreeOutline({ routerModelId, symptomId }: { routerModelId: number; symptomId: number }) {
   const [nodes, setNodes] = useState<TreeNode[] | null>(null);
+  const [hasRoot, setHasRoot] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  function load() {
-    apiFetch<{ nodes: TreeNode[] }>(
+  // State is only set from the promise callbacks, so this is safe to call
+  // straight from the effect below.
+  const load = useCallback(() => {
+    apiFetch<{ nodes: TreeNode[]; hasRoot: boolean }>(
       `/api/admin/tree?routerModelId=${routerModelId}&symptomId=${symptomId}`
-    ).then((data) => setNodes(data.nodes));
-  }
+    )
+      .then((data) => {
+        setNodes(data.nodes);
+        setHasRoot(data.hasRoot);
+        setLoadError(null);
+      })
+      .catch((err) => setLoadError(err instanceof Error ? err.message : "Could not load the tree"));
+  }, [routerModelId, symptomId]);
 
-  useEffect(load, [routerModelId, symptomId]);
+  useEffect(load, [load]);
 
   async function handleDelete(id: number) {
     if (!confirm("Delete this question?")) return;
@@ -36,6 +48,15 @@ export function TreeOutline({ routerModelId, symptomId }: { routerModelId: numbe
       load();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Delete failed");
+    }
+  }
+
+  async function handleMakeRoot(id: number) {
+    try {
+      await apiFetch(`/api/admin/nodes/${id}/root`, { method: "POST" });
+      load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not change the starting question");
     }
   }
 
@@ -51,7 +72,14 @@ export function TreeOutline({ routerModelId, symptomId }: { routerModelId: numbe
         </Link>
       </div>
 
-      {nodes === null ? (
+      {loadError ? (
+        <div className="flex items-center gap-3 text-sm">
+          <p className="text-red-600">{loadError}</p>
+          <button onClick={load} className="underline">
+            Retry
+          </button>
+        </div>
+      ) : nodes === null ? (
         <p>Loading...</p>
       ) : nodes.length === 0 ? (
         <p className="opacity-70">
@@ -59,15 +87,36 @@ export function TreeOutline({ routerModelId, symptomId }: { routerModelId: numbe
         </p>
       ) : (
         <div className="flex flex-col gap-4">
-          {nodes.map((node) => (
+          {!hasRoot && (
+            <p className="rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+              This tree has no starting question, so it isn&apos;t shown to users. Use
+              &ldquo;Make starting question&rdquo; on one of the questions below.
+            </p>
+          )}
+          {nodes.map((node, index) => (
             <div
-              key={node.id}
+              key={`${node.id}-${index}`}
               style={{ marginLeft: node.depth * 24 }}
               className="flex flex-col gap-2 rounded border border-black/10 p-3 dark:border-white/10"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="font-medium">{node.questionText}</span>
+                <span className="font-medium">
+                  {node.questionText}
+                  {node.isRoot && (
+                    <span className="ml-2 text-xs font-normal opacity-60">(starting question)</span>
+                  )}
+                  {node.unreachable && (
+                    <span className="ml-2 text-xs font-normal text-amber-600">
+                      (not reachable from the starting question)
+                    </span>
+                  )}
+                </span>
                 <span className="flex shrink-0 gap-3 text-sm">
+                  {!node.isRoot && (
+                    <button onClick={() => handleMakeRoot(node.id)} className="underline">
+                      Make starting question
+                    </button>
+                  )}
                   <Link
                     href={`/admin/trees/${routerModelId}/${symptomId}/nodes/${node.id}/edit`}
                     className="underline"

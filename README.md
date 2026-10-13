@@ -58,7 +58,28 @@ Log in at `/admin/login` with the seeded admin credentials. From there:
   outline, and add/edit/delete questions. Each question's answer options
   link either to another question or straight to a resolution. The very
   first question created for a given model+symptom pair automatically
-  becomes that tree's root.
+  becomes that tree's starting question (root); any other question can be
+  made the starting question later with "Make starting question".
+
+### Tree integrity rules
+
+Enforced server-side on every write (`src/lib/tree-rules.ts`), not just in
+the admin UI:
+
+- **No loops** — an option can't lead back to its own question, directly
+  or through other questions (A → B → A). Checked with a recursive query
+  inside the same transaction as the edit, which is rolled back on failure.
+- **Same tree only** — an option can only link to a question of the same
+  router model + symptom, and to a resolution that exists.
+- **Always a starting point** — the starting question can't be deleted
+  while other questions remain in its tree; pick a new one first. Questions
+  that aren't reachable from the starting question are still listed (and
+  flagged) in the tree outline instead of disappearing.
+- Writes to one tree are serialized with a Postgres advisory lock, so two
+  admins editing at once can't each add half of a loop.
+
+In the public wizard, a question that fails to load shows an error with
+**Retry** / **Start over** instead of an endless "Loading…".
 
 ## Data model
 
